@@ -4,7 +4,7 @@ Tortoise is a text-to-speech program built with the following priorities:
 
 1. Strong multi-voice capabilities.
 2. Highly realistic prosody and intonation.
-   
+
 This repo contains all the code needed to run Tortoise TTS in inference mode.
 
 Manuscript: https://arxiv.org/abs/2305.07243
@@ -31,7 +31,7 @@ I'm naming my speech-related repos after Mojave desert flora and fauna. Tortoise
 is insanely slow. It leverages both an autoregressive decoder **and** a diffusion decoder; both known for their low
 sampling rates. On a K80, expect to generate a medium sized sentence every 2 minutes.
 
-well..... not so slow anymore now we can get a **0.25-0.3 RTF** on 4GB vram and with streaming we can get < **500 ms** latency !!! 
+well..... not so slow anymore now we can get a **0.25-0.3 RTF** on 4GB vram and with streaming we can get < **500 ms** latency !!!
 
 ## Demos
 
@@ -64,7 +64,7 @@ This will:
 conda create --name tortoise python=3.9 numba inflect
 conda activate tortoise
 conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
-conda install transformers=4.29.2
+conda install transformers=4.31.0
 git clone https://github.com/neonbjb/tortoise-tts.git
 cd tortoise-tts
 python setup.py install
@@ -72,7 +72,7 @@ python setup.py install
 
 Optionally, pytorch can be installed in the base environment, so that other conda environments can use it too. To do this, simply send the `conda install pytorch...` line before activating the tortoise environment.
 
-> [!NOTE]  
+> [!NOTE]
 > When you want to use tortoise-tts, you will always have to ensure the `tortoise` conda environment is activated.
 
 If you are on windows, you may also need to install pysoundfile: `conda install -c conda-forge pysoundfile`
@@ -142,7 +142,7 @@ python tortoise/do_tts.py --text "I'm going to speak this" --voice random --pres
 ```
 ### do socket streaming
 ```socket server
-python tortoise/socket_server.py 
+python tortoise/socket_server.py
 ```
 will listen at port 5000
 
