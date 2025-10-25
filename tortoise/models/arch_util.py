@@ -123,6 +123,93 @@ class AttentionBlock(nn.Module):
         return (x + h).reshape(b, c, *spatial)
 
 
+class QKVAttentionModern(nn.Module):
+    """
+    A module which performs QKV attention in an effective way
+    using torch.nn.functional.scaled_dot_product_attention and
+    ignoring the mask which is not used in diffusion layers.
+    """
+
+    def __init__(self, n_heads):
+        super().__init__()
+        self.n_heads = n_heads
+
+    def forward(self, qkv, mask=None, rel_pos=None):
+        """
+        Apply QKV attention.
+
+        :param qkv: an [N x (H * 3 * C) x T] tensor of Qs, Ks, and Vs.
+        :return: an [N x (H * C) x T] tensor after attention.
+        """
+        bs, width, length = qkv.shape
+        assert width % (3 * self.n_heads) == 0
+        ch = width // (3 * self.n_heads)
+        q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
+
+        q = q.view((bs, self.n_heads, ch, length)).transpose(2, 3)
+        k = k.view((bs, self.n_heads, ch, length)).transpose(2, 3)
+        v = v.view((bs, self.n_heads, ch, length)).transpose(2, 3)
+
+        if rel_pos is not None:
+            attention_mask = rel_pos((length, length, qkv.device))
+            if attention_mask.shape[0] != bs: # [bs, self.n_heads, length, length]
+                attention_mask = attention_mask.repeat((bs,) + (1,) * (len(attention_mask.shape) - 1))
+        else:
+            attention_mask = None
+
+        a = F.scaled_dot_product_attention(
+            query=q,
+            key=k,
+            value=v,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+        return a.transpose(2, 3).reshape(bs, -1, length)
+
+
+class DiffusionAttentionBlock(nn.Module):
+    """
+    Copy of AttentionBlock that implements QKVAttention in an effective way
+    using torch.nn.functional.scaled_dot_product_attention.
+    """
+    def __init__(
+        self,
+        channels,
+        num_heads=1,
+        num_head_channels=-1,
+        do_checkpoint=True,
+        relative_pos_embeddings=False,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.do_checkpoint = do_checkpoint
+        if num_head_channels == -1:
+            self.num_heads = num_heads
+        else:
+            assert (
+                channels % num_head_channels == 0
+            ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
+            self.num_heads = channels // num_head_channels
+        self.norm = normalization(channels)
+        self.qkv = nn.Conv1d(channels, channels * 3, 1)
+        self.attention = QKVAttentionModern(self.num_heads)
+
+        self.proj_out = zero_module(nn.Conv1d(channels, channels, 1))
+        if relative_pos_embeddings:
+            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64)
+        else:
+            self.relative_pos_embeddings = None
+
+    def forward(self, x, mask=None):
+        b, c, *spatial = x.shape
+        x = x.reshape(b, c, -1)
+        qkv = self.qkv(self.norm(x))
+        h = self.attention(qkv, mask, self.relative_pos_embeddings)
+        h = self.proj_out(h)
+        return (x + h).reshape(b, c, *spatial)
+
+
 class Upsample(nn.Module):
     """
     An upsampling layer with an optional convolution.

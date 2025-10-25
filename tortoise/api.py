@@ -176,9 +176,9 @@ class TextToSpeech:
     Main entry point into Tortoise.
     """
 
-    def __init__(self, autoregressive_batch_size=None, models_dir=MODELS_DIR, 
+    def __init__(self, autoregressive_batch_size=None, models_dir=MODELS_DIR,
                  enable_redaction=True, kv_cache=False, use_deepspeed=False, half=False, device=None,
-                 tokenizer_vocab_file=None, tokenizer_basic=False):
+                 tokenizer_vocab_file=None, tokenizer_basic=False, attention_backbone='legacy'):
 
         """
         Constructor
@@ -198,7 +198,7 @@ class TextToSpeech:
             self.device = torch.device('cuda' if torch.cuda.is_available() else'cpu')
         else:
             self.device = torch.device(device)
-            
+
         if torch.backends.mps.is_available():
             self.device = torch.device('mps')
         if self.enable_redaction:
@@ -220,10 +220,11 @@ class TextToSpeech:
                                           train_solo_embeddings=False).cpu().eval()
             self.autoregressive.load_state_dict(torch.load(get_model_path('autoregressive.pth', models_dir)), strict=False)
             self.autoregressive.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=kv_cache, half=self.half)
-            
+
             self.diffusion = DiffusionTts(model_channels=1024, num_layers=10, in_channels=100, out_channels=200,
                                           in_latent_channels=1024, in_tokens=8193, dropout=0, use_fp16=False, num_heads=16,
-                                          layer_drop=0, unconditioned_percentage=0).cpu().eval()
+                                          layer_drop=0, unconditioned_percentage=0,
+                                          attention_backbone=attention_backbone).cpu().eval()
             self.diffusion.load_state_dict(torch.load(get_model_path('diffusion_decoder.pth', models_dir)))
 
         self.clvp = CLVP(dim_text=768, dim_speech=768, dim_latent=768, num_text_tokens=256, text_enc_depth=20,
@@ -236,7 +237,7 @@ class TextToSpeech:
         self.vocoder = UnivNetGenerator().cpu()
         self.vocoder.load_state_dict(torch.load(get_model_path('vocoder.pth', models_dir), map_location=torch.device('cpu'))['model_g'])
         self.vocoder.eval(inference=True)
-        
+
         self.stft = None # TacotronSTFT is only loaded if used.
 
         # Random latent generators (RLGs) are loaded lazily.
@@ -248,7 +249,7 @@ class TextToSpeech:
         yield m
         m = model.cpu()
 
-    
+
     def load_cvvp(self):
         """Load CVVP model."""
         self.cvvp = CVVP(model_dim=512, transformer_heads=8, dropout=0, mel_codes=8192, conditioning_enc_depth=8, cond_mask_percentage=0,
@@ -442,7 +443,7 @@ class TextToSpeech:
                         samples.append(codes)
 
             clip_results = []
-            
+
             if not torch.backends.mps.is_available():
                 with self.temporary_cuda(self.clvp) as clvp, torch.autocast(
                     device_type="cuda" if not torch.backends.mps.is_available() else 'mps', dtype=torch.float16, enabled=self.half
@@ -554,7 +555,7 @@ class TextToSpeech:
                             if ctokens > 8:  # 8 tokens gives the diffusion model some "breathing room" to terminate speech.
                                 latents = latents[:, :k]
                                 break
-                        mel = do_spectrogram_diffusion(diffusion, diffuser, latents, diffusion_conditioning, temperature=diffusion_temperature, 
+                        mel = do_spectrogram_diffusion(diffusion, diffuser, latents, diffusion_conditioning, temperature=diffusion_temperature,
                                                     verbose=verbose)
                         wav = vocoder.inference(mel)
                         wav_candidates.append(wav.cpu())
@@ -575,7 +576,7 @@ class TextToSpeech:
                         if ctokens > 8:  # 8 tokens gives the diffusion model some "breathing room" to terminate speech.
                             latents = latents[:, :k]
                             break
-                    mel = do_spectrogram_diffusion(diffusion, diffuser, latents, diffusion_conditioning, temperature=diffusion_temperature, 
+                    mel = do_spectrogram_diffusion(diffusion, diffuser, latents, diffusion_conditioning, temperature=diffusion_temperature,
                                                 verbose=verbose)
                     wav = vocoder.inference(mel)
                     wav_candidates.append(wav.cpu())

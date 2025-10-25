@@ -175,7 +175,12 @@ class RelativePositionBias(nn.Module):
         return ret
 
     def forward(self, qk_dots):
-        i, j, device = *qk_dots.shape[-2:], qk_dots.device
+        qk_dots_is_tensor = isinstance(qk_dots, torch.Tensor)
+        if qk_dots_is_tensor:
+            i, j, device = *qk_dots.shape[-2:], qk_dots.device
+        else:
+            i, j, device = qk_dots
+
         q_pos = torch.arange(i, dtype=torch.long, device=device)
         k_pos = torch.arange(j, dtype=torch.long, device=device)
         rel_pos = k_pos[None, :] - q_pos[:, None]
@@ -183,7 +188,11 @@ class RelativePositionBias(nn.Module):
                                                    max_distance=self.max_distance)
         values = self.relative_attention_bias(rp_bucket)
         bias = rearrange(values, 'i j h -> () h i j')
-        return qk_dots + (bias * self.scale)
+
+        if qk_dots_is_tensor:
+            return qk_dots + (bias * self.scale)
+        else:
+            return bias * self.scale
 
 
 class AlibiPositionalBias(nn.Module):
@@ -1245,4 +1254,3 @@ class ContinuousTransformerWrapper(nn.Module):
         if len(res) > 1:
             return tuple(res)
         return res[0]
-

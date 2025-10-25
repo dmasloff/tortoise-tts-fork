@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import autocast
 
-from tortoise.models.arch_util import normalization, AttentionBlock
+from tortoise.models.arch_util import normalization, AttentionBlock, DiffusionAttentionBlock
 
 
 def is_latent(t):
@@ -121,10 +121,13 @@ class ResBlock(TimestepBlock):
 
 
 class DiffusionLayer(TimestepBlock):
-    def __init__(self, model_channels, dropout, num_heads):
+    def __init__(self, model_channels, dropout, num_heads, attention_backbone='legacy'):
         super().__init__()
         self.resblk = ResBlock(model_channels, model_channels, dropout, model_channels, dims=1, use_scale_shift_norm=True)
-        self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True)
+        if attention_backbone == 'legacy':
+            self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True)
+        else:
+            self.attn = DiffusionAttentionBlock(model_channels, num_heads, relative_pos_embeddings=True)
 
     def forward(self, x, time_emb):
         y = self.resblk(x, time_emb)
@@ -146,8 +149,11 @@ class DiffusionTts(nn.Module):
             # Parameters for regularization.
             layer_drop=.1,
             unconditioned_percentage=.1,  # This implements a mechanism similar to what is used in classifier-free training.
+            attention_backbone='legacy'
     ):
         super().__init__()
+
+        AttentionBlockType = AttentionBlock if attention_backbone == 'legacy' else DiffusionAttentionBlock
 
         self.in_channels = in_channels
         self.model_channels = model_channels
@@ -171,36 +177,36 @@ class DiffusionTts(nn.Module):
         # transformer network.
         self.code_embedding = nn.Embedding(in_tokens, model_channels)
         self.code_converter = nn.Sequential(
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
         )
         self.code_norm = normalization(model_channels)
         self.latent_conditioner = nn.Sequential(
             nn.Conv1d(in_latent_channels, model_channels, 3, padding=1),
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
         )
         self.contextual_embedder = nn.Sequential(nn.Conv1d(in_channels,model_channels,3,padding=1,stride=2),
                                                  nn.Conv1d(model_channels, model_channels*2,3,padding=1,stride=2),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False))
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False))
         self.unconditioned_embedding = nn.Parameter(torch.randn(1,model_channels,1))
         self.conditioning_timestep_integrator = TimestepEmbedSequential(
-            DiffusionLayer(model_channels, dropout, num_heads),
-            DiffusionLayer(model_channels, dropout, num_heads),
-            DiffusionLayer(model_channels, dropout, num_heads),
+            DiffusionLayer(model_channels, dropout, num_heads, attention_backbone),
+            DiffusionLayer(model_channels, dropout, num_heads, attention_backbone),
+            DiffusionLayer(model_channels, dropout, num_heads, attention_backbone),
         )
 
         self.integrating_conv = nn.Conv1d(model_channels*2, model_channels, kernel_size=1)
         self.mel_head = nn.Conv1d(model_channels, in_channels, kernel_size=3, padding=1)
 
-        self.layers = nn.ModuleList([DiffusionLayer(model_channels, dropout, num_heads) for _ in range(num_layers)] +
+        self.layers = nn.ModuleList([DiffusionLayer(model_channels, dropout, num_heads, attention_backbone) for _ in range(num_layers)] +
                                     [ResBlock(model_channels, model_channels, dropout, dims=1, use_scale_shift_norm=True) for _ in range(3)])
 
         self.out = nn.Sequential(
@@ -333,4 +339,3 @@ if __name__ == '__main__':
     #o = model(clip, ts, aligned_latent, cond)
     # Test with sequence aligned conditioning
     o = model(clip, ts, aligned_sequence, cond)
-
