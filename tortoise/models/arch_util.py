@@ -46,7 +46,7 @@ class QKVAttentionLegacy(nn.Module):
     A module which performs QKV attention. Matches legacy QKVAttention + input/output heads shaping
     """
 
-    def __init__(self, n_heads):
+    def __init__(self, n_heads, **kwargs):
         super().__init__()
         self.n_heads = n_heads
 
@@ -77,6 +77,60 @@ class QKVAttentionLegacy(nn.Module):
         return a.reshape(bs, -1, length)
 
 
+class QKVAttentionModern(nn.Module):
+    """
+    A module which performs QKV attention in an effective way
+    using torch.nn.functional.scaled_dot_product_attention and
+    ignoring the mask which is not used in diffusion layers.
+    """
+
+    def __init__(self, n_heads, **kwargs):
+        super().__init__()
+        self.n_heads = n_heads
+        self.rope = kwargs.get('rope', False)
+        self.effective_backend = kwargs.get('effective_backend', False)
+
+    def forward(self, qkv, mask=None, positional_embeddings=None):
+        """
+        Apply QKV attention.
+
+        :param qkv: an [N x (H * 3 * C) x T] tensor of Qs, Ks, and Vs.
+        :return: an [N x (H * C) x T] tensor after attention.
+        """
+        bs, width, length = qkv.shape
+        assert width % (3 * self.n_heads) == 0
+        ch = width // (3 * self.n_heads)
+        q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
+
+        q = q.view((bs, self.n_heads, ch, length)).transpose(2, 3)
+        k = k.view((bs, self.n_heads, ch, length)).transpose(2, 3)
+        v = v.view((bs, self.n_heads, ch, length)).transpose(2, 3)
+
+        if positional_embeddings is not None:
+            if not self.rope:
+                attention_mask = positional_embeddings((length, length, qkv.device))
+            else:
+                q = positional_embeddings(q)
+                k = positional_embeddings(k)
+                attention_mask = None
+
+        if self.effective_backend is not None:
+            q = q.type(torch.float16).contiguous()
+            k = k.type(torch.float16).contiguous()
+            v = v.type(torch.float16).contiguous()
+            attention_mask = None
+
+        a = F.scaled_dot_product_attention(
+            query=q,
+            key=k,
+            value=v,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+        return a.transpose(2, 3).reshape(bs, -1, length).type(qkv.dtype)
+
+
 class AttentionBlock(nn.Module):
     """
     An attention block that allows spatial positions to attend to each other.
@@ -93,6 +147,7 @@ class AttentionBlock(nn.Module):
         do_checkpoint=True,
         relative_pos_embeddings=False,
         cache=False,
+        **kwargs
     ):
         super().__init__()
         self.channels = channels
@@ -124,52 +179,6 @@ class AttentionBlock(nn.Module):
         return (x + h).reshape(b, c, *spatial)
 
 
-class QKVAttentionModern(nn.Module):
-    """
-    A module which performs QKV attention in an effective way
-    using torch.nn.functional.scaled_dot_product_attention and
-    ignoring the mask which is not used in diffusion layers.
-    """
-
-    def __init__(self, n_heads):
-        super().__init__()
-        self.n_heads = n_heads
-
-    def forward(self, qkv, mask=None, rel_pos=None):
-        """
-        Apply QKV attention.
-
-        :param qkv: an [N x (H * 3 * C) x T] tensor of Qs, Ks, and Vs.
-        :return: an [N x (H * C) x T] tensor after attention.
-        """
-        bs, width, length = qkv.shape
-        assert width % (3 * self.n_heads) == 0
-        ch = width // (3 * self.n_heads)
-        q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
-
-        q = q.view((bs, self.n_heads, ch, length)).transpose(2, 3).type(torch.float16).contiguous()
-        k = k.view((bs, self.n_heads, ch, length)).transpose(2, 3).type(torch.float16).contiguous()
-        v = v.view((bs, self.n_heads, ch, length)).transpose(2, 3).type(torch.float16).contiguous()
-
-        if rel_pos is not None:
-            attention_mask = rel_pos((length, length, qkv.device))
-            if attention_mask.shape[0] != bs: # [bs, self.n_heads, length, length]
-                attention_mask = attention_mask.repeat((bs,) + (1,) * (len(attention_mask.shape) - 1))
-            #attention_mask = attention_mask.contiguous()
-        else:
-            attention_mask = None
-
-        a = F.scaled_dot_product_attention(
-            query=q,
-            key=k,
-            value=v,
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=False,
-        )
-        return a.transpose(2, 3).reshape(bs, -1, length).type(qkv.dtype)
-
-
 class DiffusionAttentionBlock(nn.Module):
     """
     Copy of AttentionBlock that implements QKVAttention in an effective way
@@ -183,6 +192,7 @@ class DiffusionAttentionBlock(nn.Module):
         do_checkpoint=True,
         relative_pos_embeddings=False,
         cache=False,
+        **kwargs
     ):
         super().__init__()
         self.channels = channels
@@ -196,13 +206,15 @@ class DiffusionAttentionBlock(nn.Module):
             self.num_heads = channels // num_head_channels
         self.norm = normalization(channels)
         self.qkv = nn.Conv1d(channels, channels * 3, 1)
-        self.attention = QKVAttentionModern(self.num_heads)
+        self.attention = QKVAttentionModern(self.num_heads, **kwargs)
 
         self.proj_out = zero_module(nn.Conv1d(channels, channels, 1))
-        if relative_pos_embeddings:
-            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64, cache=cache)
-        else:
+        if not relative_pos_embeddings:
             self.relative_pos_embeddings = None
+        elif kwargs.get('rope', False):
+            self.relative_pos_embeddings = RotaryPositionalEmbeddings(d=channels // self.num_heads)
+        else:
+            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64, cache=cache)
 
     def forward(self, x, mask=None):
         b, c, *spatial = x.shape

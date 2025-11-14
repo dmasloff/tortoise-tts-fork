@@ -152,7 +152,7 @@ class DiffusionTts(nn.Module):
             attention_backbone='legacy'
     ):
         super().__init__()
-        attention_block_kwargs = {}
+        attention_block_kwargs = {'rope': False}
 
         if attention_backbone == 'legacy':
             AttentionBlockType = AttentionBlock
