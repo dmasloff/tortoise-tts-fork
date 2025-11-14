@@ -92,6 +92,7 @@ class AttentionBlock(nn.Module):
         num_head_channels=-1,
         do_checkpoint=True,
         relative_pos_embeddings=False,
+        cache=False,
     ):
         super().__init__()
         self.channels = channels
@@ -110,7 +111,7 @@ class AttentionBlock(nn.Module):
 
         self.proj_out = zero_module(nn.Conv1d(channels, channels, 1))
         if relative_pos_embeddings:
-            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64)
+            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64, cache=cache)
         else:
             self.relative_pos_embeddings = None
 
@@ -181,6 +182,7 @@ class DiffusionAttentionBlock(nn.Module):
         num_head_channels=-1,
         do_checkpoint=True,
         relative_pos_embeddings=False,
+        cache=False,
     ):
         super().__init__()
         self.channels = channels
@@ -198,7 +200,7 @@ class DiffusionAttentionBlock(nn.Module):
 
         self.proj_out = zero_module(nn.Conv1d(channels, channels, 1))
         if relative_pos_embeddings:
-            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64)
+            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64, cache=cache)
         else:
             self.relative_pos_embeddings = None
 

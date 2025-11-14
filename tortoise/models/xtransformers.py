@@ -144,13 +144,14 @@ class FixedPositionalEmbedding(nn.Module):
 
 
 class RelativePositionBias(nn.Module):
-    def __init__(self, scale, causal=False, num_buckets=32, max_distance=128, heads=8):
+    def __init__(self, scale, causal=False, num_buckets=32, max_distance=128, heads=8, cache=False):
         super().__init__()
         self.scale = scale
         self.causal = causal
         self.num_buckets = num_buckets
         self.max_distance = max_distance
         self.relative_attention_bias = nn.Embedding(num_buckets, heads)
+        self.cache = cache
 
     @staticmethod
     def _relative_position_bucket(relative_position, causal=True, num_buckets=32, max_distance=128):
@@ -181,13 +182,22 @@ class RelativePositionBias(nn.Module):
         else:
             i, j, device = qk_dots
 
-        q_pos = torch.arange(i, dtype=torch.long, device=device)
-        k_pos = torch.arange(j, dtype=torch.long, device=device)
-        rel_pos = k_pos[None, :] - q_pos[:, None]
-        rp_bucket = self._relative_position_bucket(rel_pos, causal=self.causal, num_buckets=self.num_buckets,
-                                                   max_distance=self.max_distance)
-        values = self.relative_attention_bias(rp_bucket)
-        bias = rearrange(values, 'i j h -> () h i j')
+        if hasattr(self.bias_cached) and self.i_cached >= i and self.j_cached >= j and self.device_cached == device:
+            bias = self.bias_cached
+        else:
+            q_pos = torch.arange(i, dtype=torch.long, device=device)
+            k_pos = torch.arange(j, dtype=torch.long, device=device)
+            rel_pos = k_pos[None, :] - q_pos[:, None]
+            rp_bucket = self._relative_position_bucket(rel_pos, causal=self.causal, num_buckets=self.num_buckets,
+                                                    max_distance=self.max_distance)
+            values = self.relative_attention_bias(rp_bucket)
+            bias = rearrange(values, 'i j h -> () h i j')
+
+            if self.cache:
+                self.i_cached = i
+                self.j_cached = j
+                self.device_cached = device
+                self.bias_cached = bias
 
         if qk_dots_is_tensor:
             return qk_dots + (bias * self.scale)
