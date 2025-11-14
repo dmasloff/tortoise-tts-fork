@@ -182,7 +182,7 @@ class RelativePositionBias(nn.Module):
         else:
             i, j, device = qk_dots
 
-        if hasattr(self.bias_cached) and self.i_cached >= i and self.j_cached >= j and self.device_cached == device:
+        if hasattr(self, 'bias_cached') and self.i_cached >= i and self.j_cached >= j and self.device_cached == device:
             bias = self.bias_cached
         else:
             q_pos = torch.arange(i, dtype=torch.long, device=device)

@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import autocast
 
-from tortoise.models.arch_util import normalization, AttentionBlock, DiffusionAttentionBlock, modulation
+from tortoise.models.arch_util import normalization, AttentionBlock, DiffusionAttentionBlock, modulate
 
 
 def is_latent(t):
