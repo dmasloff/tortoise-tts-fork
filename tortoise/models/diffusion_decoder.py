@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import autocast
 
-from tortoise.models.arch_util import normalization, AttentionBlock, DiffusionAttentionBlock
+from tortoise.models.arch_util import normalization, AttentionBlock, DiffusionAttentionBlock, modulation
 
 
 def is_latent(t):
@@ -132,6 +132,36 @@ class DiffusionLayer(TimestepBlock):
     def forward(self, x, time_emb):
         y = self.resblk(x, time_emb)
         return self.attn(y)
+
+
+class DiTBlock(nn.Module):
+    def __init__(self, model_channels, dropout, num_heads, mlp_ratio=4.0, **block_kwargs):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(model_channels, elementwise_affine=False, eps=1e-6)
+
+        self.attn = DiffusionAttentionBlock(model_channels, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+
+        self.norm2 = nn.LayerNorm(model_channels, elementwise_affine=False, eps=1e-6)
+
+        mlp_hidden_dim = int(model_channels * mlp_ratio)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(model_channels, mlp_hidden_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, model_channels)
+        )
+
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(model_channels, 6 * model_channels)
+        )
+
+    def forward(self, x, time_emb):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(time_emb).chunk(6, dim=1)
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        return x
 
 
 class DiffusionTts(nn.Module):
