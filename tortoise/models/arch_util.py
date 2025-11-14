@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
-from tortoise.models.xtransformers import ContinuousTransformerWrapper, RelativePositionBias
+from tortoise.models.xtransformers import ContinuousTransformerWrapper, RelativePositionBias, RotaryPositionalEmbeddings
 
 
 def zero_module(module):
@@ -146,14 +146,15 @@ class QKVAttentionModern(nn.Module):
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
 
-        q = q.view((bs, self.n_heads, ch, length)).transpose(2, 3)
-        k = k.view((bs, self.n_heads, ch, length)).transpose(2, 3)
-        v = v.view((bs, self.n_heads, ch, length)).transpose(2, 3)
+        q = q.view((bs, self.n_heads, ch, length)).transpose(2, 3).type(torch.float16).contiguous()
+        k = k.view((bs, self.n_heads, ch, length)).transpose(2, 3).type(torch.float16).contiguous()
+        v = v.view((bs, self.n_heads, ch, length)).transpose(2, 3).type(torch.float16).contiguous()
 
         if rel_pos is not None:
             attention_mask = rel_pos((length, length, qkv.device))
             if attention_mask.shape[0] != bs: # [bs, self.n_heads, length, length]
                 attention_mask = attention_mask.repeat((bs,) + (1,) * (len(attention_mask.shape) - 1))
+            #attention_mask = attention_mask.contiguous()
         else:
             attention_mask = None
 
@@ -161,11 +162,11 @@ class QKVAttentionModern(nn.Module):
             query=q,
             key=k,
             value=v,
-            attn_mask=attention_mask,
+            attn_mask=None,
             dropout_p=0.0,
             is_causal=False,
         )
-        return a.transpose(2, 3).reshape(bs, -1, length)
+        return a.transpose(2, 3).reshape(bs, -1, length).type(qkv.dtype)
 
 
 class DiffusionAttentionBlock(nn.Module):

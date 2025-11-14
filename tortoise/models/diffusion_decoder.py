@@ -152,8 +152,23 @@ class DiffusionTts(nn.Module):
             attention_backbone='legacy'
     ):
         super().__init__()
+        attention_block_kwargs = {}
 
-        AttentionBlockType = AttentionBlock if attention_backbone == 'legacy' else DiffusionAttentionBlock
+        if attention_backbone == 'legacy':
+            AttentionBlockType = AttentionBlock
+        elif attention_backbone == 'legacy/cached':
+            AttentionBlockType = AttentionBlock
+            attention_block_kwargs['cached'] = True
+        elif attention_backbone == 'modern':
+            AttentionBlockType = DiffusionAttentionBlock
+        elif attention_backbone == 'modern/cached':
+            AttentionBlockType = DiffusionAttentionBlock
+            attention_block_kwargs['cached'] = True
+        elif attention_backbone == 'rope':
+            AttentionBlockType = DiffusionAttentionBlock
+            attention_block_kwargs['rope'] = True
+        else:
+            assert False, 'unknown backbone type'
 
         self.in_channels = in_channels
         self.model_channels = model_channels
@@ -177,7 +192,7 @@ class DiffusionTts(nn.Module):
         # transformer network.
         self.code_embedding = nn.Embedding(in_tokens, model_channels)
         self.code_converter = nn.Sequential(
-            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True, **attentio),
             AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
             AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
         )
