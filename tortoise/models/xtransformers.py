@@ -153,6 +153,9 @@ class RelativePositionBias(nn.Module):
         self.relative_attention_bias = nn.Embedding(num_buckets, heads)
         self.cache = cache
 
+    def _slice(self, rp_bucket_cached, i, j):
+        return rp_bucket_cached[..., :i, :j]
+
     @staticmethod
     def _relative_position_bucket(relative_position, causal=True, num_buckets=32, max_distance=128):
         ret = 0
@@ -182,10 +185,21 @@ class RelativePositionBias(nn.Module):
         else:
             i, j, device = qk_dots
 
-        if hasattr(self, 'bias_cached') and self.i_cached >= i and self.j_cached >= j and self.device_cached == device:
-            bias = self.bias_cached
+        use_cache = (
+            self.cache and
+            hasattr(self, "bias_cached") and
+            self.i_cached >= i and
+            self.j_cached >= j and
+            self.device_cached == device
+        )
+
+        if use_cache:
+            bias = self._slice(self.bias_cached, i, j).clone()
         else:
-            q_pos = torch.arange(i, dtype=torch.long, device=device)
+            if self.causal:
+                q_pos = torch.arange(j - i, j, dtype=torch.long, device=device)
+            else:
+                q_pos = torch.arange(i, dtype=torch.long, device=device)
             k_pos = torch.arange(j, dtype=torch.long, device=device)
             rel_pos = k_pos[None, :] - q_pos[:, None]
             rp_bucket = self._relative_position_bucket(rel_pos, causal=self.causal, num_buckets=self.num_buckets,
@@ -197,10 +211,10 @@ class RelativePositionBias(nn.Module):
                 self.i_cached = i
                 self.j_cached = j
                 self.device_cached = device
-                self.bias_cached = bias
+                self.bias_cached = bias.clone()
 
         if qk_dots_is_tensor:
-            return qk_dots + (bias * self.scale)
+            return qk_dots + bias * self.scale
         else:
             return bias * self.scale
 

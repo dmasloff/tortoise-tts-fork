@@ -121,25 +121,32 @@ class ResBlock(TimestepBlock):
 
 
 class DiffusionLayer(TimestepBlock):
-    def __init__(self, model_channels, dropout, num_heads, attention_backbone='legacy'):
+    def __init__(self, model_channels, dropout, num_heads, attention_backbone='legacy', cache=False, **kwargs):
         super().__init__()
         self.resblk = ResBlock(model_channels, model_channels, dropout, model_channels, dims=1, use_scale_shift_norm=True)
-        if attention_backbone == 'legacy':
-            self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True)
+        if 'cache' in attention_backbone:
+            cache = True
+        if 'legacy' in attention_backbone:
+            self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
         else:
-            self.attn = DiffusionAttentionBlock(model_channels, num_heads, relative_pos_embeddings=True)
+            self.attn = DiffusionAttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
 
     def forward(self, x, time_emb):
         y = self.resblk(x, time_emb)
         return self.attn(y)
 
 
-class DiTBlock(nn.Module):
-    def __init__(self, model_channels, dropout, num_heads, mlp_ratio=4.0, **block_kwargs):
+class DiTBlock(TimestepBlock):
+    def __init__(self, model_channels, dropout, num_heads, attention_backbone='legacy', cache=False, mlp_ratio=4.0, **kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(model_channels, elementwise_affine=False, eps=1e-6)
 
-        self.attn = DiffusionAttentionBlock(model_channels, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        if 'cache' in attention_backbone:
+            cache = True
+        if 'legacy' in attention_backbone:
+            self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
+        else:
+            self.attn = DiffusionAttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
 
         self.norm2 = nn.LayerNorm(model_channels, elementwise_affine=False, eps=1e-6)
 
@@ -182,7 +189,7 @@ class DiffusionTts(nn.Module):
             attention_backbone='legacy'
     ):
         super().__init__()
-        attention_block_kwargs = {'rope': False}
+        attention_block_kwargs = {'rope': False, 'attention_backbone': 'legacy'}
 
         if attention_backbone == 'legacy':
             AttentionBlockType = AttentionBlock
@@ -190,12 +197,15 @@ class DiffusionTts(nn.Module):
             AttentionBlockType = AttentionBlock
             attention_block_kwargs['cache'] = True
         elif attention_backbone == 'modern':
+            attention_block_kwargs['attention_backbone'] = 'modern'
             AttentionBlockType = DiffusionAttentionBlock
         elif attention_backbone == 'modern/cache':
             AttentionBlockType = DiffusionAttentionBlock
+            attention_block_kwargs['attention_backbone'] = 'modern'
             attention_block_kwargs['cache'] = True
         elif attention_backbone == 'rope':
             AttentionBlockType = DiffusionAttentionBlock
+            attention_block_kwargs['attention_backbone'] = 'modern'
             attention_block_kwargs['rope'] = True
         else:
             assert False, 'unknown backbone type'

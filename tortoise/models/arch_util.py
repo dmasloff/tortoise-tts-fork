@@ -118,7 +118,7 @@ class QKVAttentionModern(nn.Module):
                 k = positional_embeddings(k)
                 attention_mask = None
 
-        if self.effective_backend is not None:
+        if self.effective_backend:
             q = q.type(torch.float16).contiguous()
             k = k.type(torch.float16).contiguous()
             v = v.type(torch.float16).contiguous()
