@@ -144,13 +144,17 @@ class FixedPositionalEmbedding(nn.Module):
 
 
 class RelativePositionBias(nn.Module):
-    def __init__(self, scale, causal=False, num_buckets=32, max_distance=128, heads=8):
+    def __init__(self, scale, causal=False, num_buckets=32, max_distance=128, heads=8, cache=False):
         super().__init__()
         self.scale = scale
         self.causal = causal
         self.num_buckets = num_buckets
         self.max_distance = max_distance
         self.relative_attention_bias = nn.Embedding(num_buckets, heads)
+        self.cache = cache
+
+    def _slice(self, rp_bucket_cached, i, j):
+        return rp_bucket_cached[..., :i, :j]
 
     @staticmethod
     def _relative_position_bucket(relative_position, causal=True, num_buckets=32, max_distance=128):
@@ -181,16 +185,36 @@ class RelativePositionBias(nn.Module):
         else:
             i, j, device = qk_dots
 
-        q_pos = torch.arange(i, dtype=torch.long, device=device)
-        k_pos = torch.arange(j, dtype=torch.long, device=device)
-        rel_pos = k_pos[None, :] - q_pos[:, None]
-        rp_bucket = self._relative_position_bucket(rel_pos, causal=self.causal, num_buckets=self.num_buckets,
-                                                   max_distance=self.max_distance)
-        values = self.relative_attention_bias(rp_bucket)
-        bias = rearrange(values, 'i j h -> () h i j')
+        use_cache = (
+            self.cache and
+            hasattr(self, "bias_cached") and
+            self.i_cached >= i and
+            self.j_cached >= j and
+            self.device_cached == device
+        )
+
+        if use_cache:
+            bias = self._slice(self.bias_cached, i, j).clone()
+        else:
+            if self.causal:
+                q_pos = torch.arange(j - i, j, dtype=torch.long, device=device)
+            else:
+                q_pos = torch.arange(i, dtype=torch.long, device=device)
+            k_pos = torch.arange(j, dtype=torch.long, device=device)
+            rel_pos = k_pos[None, :] - q_pos[:, None]
+            rp_bucket = self._relative_position_bucket(rel_pos, causal=self.causal, num_buckets=self.num_buckets,
+                                                    max_distance=self.max_distance)
+            values = self.relative_attention_bias(rp_bucket)
+            bias = rearrange(values, 'i j h -> () h i j')
+
+            if self.cache:
+                self.i_cached = i
+                self.j_cached = j
+                self.device_cached = device
+                self.bias_cached = bias.clone()
 
         if qk_dots_is_tensor:
-            return qk_dots + (bias * self.scale)
+            return qk_dots + bias * self.scale
         else:
             return bias * self.scale
 
@@ -293,6 +317,51 @@ def apply_rotary_pos_emb(t, freqs):
     seq_len = t.shape[-2]
     freqs = freqs[:, :, -seq_len:]
     return (t * freqs.cos()) + (rotate_half(t) * freqs.sin())
+
+
+class RotaryPositionalEmbeddings(nn.Module):
+    def __init__(self, d: int, base: int = 10_000):
+        super().__init__()
+
+        self.base = base
+        self.d = int(d)
+        self.cos_cached = None
+        self.sin_cached = None
+
+    def _build_cache(self, x: torch.Tensor):
+        if self.cos_cached is not None and x.shape[0] <= self.cos_cached.shape[0]:
+            return
+
+        seq_len = x.shape[0]
+        theta = 1.0 / (self.base ** (torch.arange(0, self.d,
+                       2).float() / self.d)).to(x.device)
+        seq_idx = torch.arange(seq_len, device=x.device).float().to(x.device)
+        idx_theta = torch.einsum("n,d->nd", seq_idx, theta)
+        idx_theta2 = torch.cat([idx_theta, idx_theta], dim=1)
+        self.cos_cached = idx_theta2.cos()[:, None, None, :]
+        self.sin_cached = idx_theta2.sin()[:, None, None, :]
+
+    def _neg_half(self, x: torch.Tensor):
+        d_2 = self.d // 2
+        return torch.cat([-x[:, :, :, d_2:], x[:, :, :, :d_2]], dim=-1)
+
+    def forward(self, x: torch.Tensor):
+        """
+        - `x` is the Tensor at the head of a key or a query with shape `[batch_size, n_heads, seq_len, d]`
+        - version from Matcha-TTS: `[seq_len, batch_size, n_heads, d]`
+        """
+        # Ours [batch_size, n_heads, seq_len, d]
+        # Their [seq_len, batch_size, n_heads, d] -> [n_heads, seq_len, batch_size, d]
+        # x = rearrange(x, "b h t d -> t b h d")
+        x = rearrange(x, "b h t d -> h t b d")
+
+        self._build_cache(x)
+        x_rope, x_pass = x[..., : self.d], x[..., self.d:]
+        neg_half_x = self._neg_half(x_rope)
+        x_rope = (x_rope * self.cos_cached[: x.shape[0]]) + \
+            (neg_half_x * self.sin_cached[: x.shape[0]])
+
+        return rearrange(torch.cat((x_rope, x_pass), dim=-1), "h t b d -> b h t d")
 
 
 # norms

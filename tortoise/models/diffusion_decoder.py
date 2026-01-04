@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import autocast
 
-from tortoise.models.arch_util import normalization, AttentionBlock, DiffusionAttentionBlock
+from tortoise.models.arch_util import normalization, AttentionBlock, DiffusionAttentionBlock, modulate
 
 
 def is_latent(t):
@@ -121,17 +121,54 @@ class ResBlock(TimestepBlock):
 
 
 class DiffusionLayer(TimestepBlock):
-    def __init__(self, model_channels, dropout, num_heads, attention_backbone='legacy'):
+    def __init__(self, model_channels, dropout, num_heads, attention_backbone='legacy', cache=False, **kwargs):
         super().__init__()
         self.resblk = ResBlock(model_channels, model_channels, dropout, model_channels, dims=1, use_scale_shift_norm=True)
-        if attention_backbone == 'legacy':
-            self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True)
+        if 'cache' in attention_backbone:
+            cache = True
+        if 'legacy' in attention_backbone:
+            self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
         else:
-            self.attn = DiffusionAttentionBlock(model_channels, num_heads, relative_pos_embeddings=True)
+            self.attn = DiffusionAttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
 
     def forward(self, x, time_emb):
         y = self.resblk(x, time_emb)
         return self.attn(y)
+
+
+class DiTBlock(TimestepBlock):
+    def __init__(self, model_channels, dropout, num_heads, attention_backbone='legacy', cache=False, mlp_ratio=4.0, **kwargs):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(model_channels, elementwise_affine=False, eps=1e-6)
+
+        if 'cache' in attention_backbone:
+            cache = True
+        if 'legacy' in attention_backbone:
+            self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
+        else:
+            self.attn = DiffusionAttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
+
+        self.norm2 = nn.LayerNorm(model_channels, elementwise_affine=False, eps=1e-6)
+
+        mlp_hidden_dim = int(model_channels * mlp_ratio)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(model_channels, mlp_hidden_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, model_channels)
+        )
+
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(model_channels, 6 * model_channels)
+        )
+
+    def forward(self, x, time_emb):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(time_emb).chunk(6, dim=1)
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        return x
 
 
 class DiffusionTts(nn.Module):
@@ -152,8 +189,26 @@ class DiffusionTts(nn.Module):
             attention_backbone='legacy'
     ):
         super().__init__()
+        attention_block_kwargs = {'rope': False, 'attention_backbone': 'legacy'}
 
-        AttentionBlockType = AttentionBlock if attention_backbone == 'legacy' else DiffusionAttentionBlock
+        if attention_backbone == 'legacy':
+            AttentionBlockType = AttentionBlock
+        elif attention_backbone == 'legacy/cache':
+            AttentionBlockType = AttentionBlock
+            attention_block_kwargs['cache'] = True
+        elif attention_backbone == 'modern':
+            attention_block_kwargs['attention_backbone'] = 'modern'
+            AttentionBlockType = DiffusionAttentionBlock
+        elif attention_backbone == 'modern/cache':
+            AttentionBlockType = DiffusionAttentionBlock
+            attention_block_kwargs['attention_backbone'] = 'modern'
+            attention_block_kwargs['cache'] = True
+        elif attention_backbone == 'rope':
+            AttentionBlockType = DiffusionAttentionBlock
+            attention_block_kwargs['attention_backbone'] = 'modern'
+            attention_block_kwargs['rope'] = True
+        else:
+            assert False, 'unknown backbone type'
 
         self.in_channels = in_channels
         self.model_channels = model_channels
@@ -177,25 +232,30 @@ class DiffusionTts(nn.Module):
         # transformer network.
         self.code_embedding = nn.Embedding(in_tokens, model_channels)
         self.code_converter = nn.Sequential(
-            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True, **attention_block_kwargs),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True, **attention_block_kwargs),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True, **attention_block_kwargs),
         )
         self.code_norm = normalization(model_channels)
         self.latent_conditioner = nn.Sequential(
             nn.Conv1d(in_latent_channels, model_channels, 3, padding=1),
-            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True, **attention_block_kwargs),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True, **attention_block_kwargs),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True, **attention_block_kwargs),
+            AttentionBlockType(model_channels, num_heads, relative_pos_embeddings=True, **attention_block_kwargs),
         )
         self.contextual_embedder = nn.Sequential(nn.Conv1d(in_channels,model_channels,3,padding=1,stride=2),
                                                  nn.Conv1d(model_channels, model_channels*2,3,padding=1,stride=2),
-                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False))
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True,
+                                                                    do_checkpoint=False, **attention_block_kwargs),
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True,
+                                                                    do_checkpoint=False, **attention_block_kwargs),
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True,
+                                                                    do_checkpoint=False, **attention_block_kwargs),
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True,
+                                                                    do_checkpoint=False, **attention_block_kwargs),
+                                                 AttentionBlockType(model_channels*2, num_heads, relative_pos_embeddings=True,
+                                                                    do_checkpoint=False, **attention_block_kwargs))
         self.unconditioned_embedding = nn.Parameter(torch.randn(1,model_channels,1))
         self.conditioning_timestep_integrator = TimestepEmbedSequential(
             DiffusionLayer(model_channels, dropout, num_heads, attention_backbone),
