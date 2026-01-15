@@ -186,10 +186,20 @@ class DiffusionTts(nn.Module):
             # Parameters for regularization.
             layer_drop=.1,
             unconditioned_percentage=.1,  # This implements a mechanism similar to what is used in classifier-free training.
-            attention_backbone='legacy'
+            # Parameters for enabling SDP optimizations
+            attention_backbone='legacy',
+            use_optimized_backend=False,
+            use_contigious_tensors=False,
+
     ):
         super().__init__()
-        attention_block_kwargs = {'rope': False, 'attention_backbone': 'legacy'}
+        attention_block_kwargs = {
+            'attention_backbone': 'legacy',
+            'cache': False,
+            'rope': False,
+            'use_optimized_backend': use_optimized_backend,
+            'use_contiguous_tensors': use_contigious_tensors,
+        }
 
         if attention_backbone == 'legacy':
             AttentionBlockType = AttentionBlock
@@ -258,15 +268,15 @@ class DiffusionTts(nn.Module):
                                                                     do_checkpoint=False, **attention_block_kwargs))
         self.unconditioned_embedding = nn.Parameter(torch.randn(1,model_channels,1))
         self.conditioning_timestep_integrator = TimestepEmbedSequential(
-            DiffusionLayer(model_channels, dropout, num_heads, attention_backbone),
-            DiffusionLayer(model_channels, dropout, num_heads, attention_backbone),
-            DiffusionLayer(model_channels, dropout, num_heads, attention_backbone),
+            DiffusionLayer(model_channels, dropout, num_heads, **attention_block_kwargs),
+            DiffusionLayer(model_channels, dropout, num_heads, **attention_block_kwargs),
+            DiffusionLayer(model_channels, dropout, num_heads, **attention_block_kwargs),
         )
 
         self.integrating_conv = nn.Conv1d(model_channels*2, model_channels, kernel_size=1)
         self.mel_head = nn.Conv1d(model_channels, in_channels, kernel_size=3, padding=1)
 
-        self.layers = nn.ModuleList([DiffusionLayer(model_channels, dropout, num_heads, attention_backbone) for _ in range(num_layers)] +
+        self.layers = nn.ModuleList([DiffusionLayer(model_channels, dropout, num_heads, **attention_block_kwargs) for _ in range(num_layers)] +
                                     [ResBlock(model_channels, model_channels, dropout, dims=1, use_scale_shift_norm=True) for _ in range(3)])
 
         self.out = nn.Sequential(

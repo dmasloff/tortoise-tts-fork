@@ -92,7 +92,8 @@ class QKVAttentionModern(nn.Module):
         super().__init__()
         self.n_heads = n_heads
         self.rope = kwargs.get('rope', False)
-        self.effective_backend = kwargs.get('effective_backend', False)
+        self.optimized_backend = kwargs.get('use_optimized_backend', False)
+        self.apply_contiguous = kwargs.get('use_contiguous_tensors', False)
 
     def forward(self, qkv, mask=None, positional_embeddings=None):
         """
@@ -111,18 +112,24 @@ class QKVAttentionModern(nn.Module):
         v = v.view((bs, self.n_heads, ch, length)).transpose(2, 3)
 
         if positional_embeddings is not None:
-            if not self.rope:
-                attention_mask = positional_embeddings((length, length, qkv.device))
-            else:
+            if self.rope:
                 q = positional_embeddings(q)
                 k = positional_embeddings(k)
                 attention_mask = None
+            else:
+                attention_mask = positional_embeddings((length, length, qkv.device))
 
-        if self.effective_backend:
+        if self.optimized_backend:
             q = q.type(torch.float16).contiguous()
             k = k.type(torch.float16).contiguous()
             v = v.type(torch.float16).contiguous()
             attention_mask = None
+        elif self.apply_contiguous:
+            q = q.contiguous()
+            k = k.contiguous()
+            v = v.contiguous()
+            if attention_mask is not None:
+                attention_mask = attention_mask.contiguous()
 
         a = F.scaled_dot_product_attention(
             query=q,
