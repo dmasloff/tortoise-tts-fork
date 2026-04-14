@@ -96,7 +96,7 @@ class ResBlock(TimestepBlock):
             normalization(self.out_channels),
             nn.SiLU(),
             nn.Dropout(p=dropout),
-                nn.Conv1d(self.out_channels, self.out_channels, kernel_size, padding=padding),
+            nn.Conv1d(self.out_channels, self.out_channels, kernel_size, padding=padding),
         )
 
         if self.out_channels == channels:
@@ -166,8 +166,43 @@ class DiTBlock(TimestepBlock):
 
     def forward(self, x, time_emb):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(time_emb).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        
+        y = self.norm1(x.transpose(1, 2))
+        x = x + gate_msa.unsqueeze(-1) * self.attn(modulate(y, shift_msa, scale_msa).transpose(1, 2))
+        
+        y = self.norm2(x.transpose(1, 2))
+        x = x + gate_mlp.unsqueeze(-1) * self.mlp(modulate(y, shift_mlp, scale_mlp)).transpose(1, 2)
+        return x
+
+
+class LlamaBlock(TimestepBlock):
+    def __init__(self, model_channels, dropout, num_heads, attention_backbone='legacy', cache=False, mlp_ratio=4.0, **kwargs):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(model_channels, elementwise_affine=True, eps=1e-6)
+        
+        if 'cache' in attention_backbone:
+            cache = True        
+        if 'legacy' in attention_backbone:
+            self.attn = AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
+        else:
+            self.attn = DiffusionAttentionBlock(model_channels, num_heads, relative_pos_embeddings=True, cache=cache, **kwargs)
+            
+        self.norm2 = nn.LayerNorm(model_channels, elementwise_affine=True, eps=1e-6)
+        
+        mlp_hidden_dim = int(model_channels * mlp_ratio)
+        assert mlp_hidden_dim % 2 == 0
+        self.up_proj = nn.Linear(model_channels, mlp_hidden_dim, bias=False)
+        self.down_proj = nn.Linear(mlp_hidden_dim // 2, model_channels, bias=False)
+        
+    def forward(self, x, time_emb):
+        while len(time_emb.shape) < len(x.shape):
+            time_emb = time_emb[..., None]
+            
+        x = x + time_emb
+        x = x + self.attn(self.norm1(x.transpose(1, 2)).transpose(1, 2))
+        
+        gate, up = self.up_proj(self.norm2(x.transpose(1, 2))).chunk(2, dim=-1)
+        x = x + self.down_proj(F.silu(gate) * up).transpose(1, 2)
         return x
 
 
